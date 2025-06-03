@@ -32,7 +32,6 @@ jobs:
         run: shellcheck -o all *.sh
 
   test-ntp:
-    needs: lint
     runs-on: ubuntu-latest
 
     steps:
@@ -46,6 +45,9 @@ jobs:
         run: |
           systemctl status chrony.service
           sleep 5
+          chronyc sources
+          chronyc tracking
+          chronyc sourcestats
           systemctl status chrony.service
           chronyd -Q -t 3 "server localhost iburst maxsamples 1"
 
