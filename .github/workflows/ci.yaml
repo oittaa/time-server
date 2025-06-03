@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+
+  pull_request:
+    branches: [master]
+
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Install checkbashisms and shfmt
+        run: |
+          sudo apt-get update
+          sudo apt-get install devscripts shfmt 
+
+      - name: checkbashisms
+        run: checkbashisms *.sh
+
+      - name: shfmt
+        run: shfmt -d -s -i 4 *.sh
+
+      - name: shellcheck
+        run: shellcheck -o all *.sh
+
+  test-ntp:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Run the script
+        run: sudo ./time-server.sh --debug
+
+      - name: Check NTP server
+        run: |
+          sudo echo "pool ntp.ubuntu.com        iburst maxsources 4"  | sudo tee /etc/chrony/sources.d/custom.sources
+          sudo echo "pool pool.ntp.org          iburst maxsources 4"  | sudo tee -a /etc/chrony/sources.d/custom.sources
+          sudo systemctl restart chrony.service
+          sleep 5
+          chronyd -Q -t 3 "server localhost iburst maxsamples 1"
+
+  test-nts:
+    needs: [lint, test-ntp]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Run the script
+        run: sudo ./time-server.sh --debug -d ${{ secrets.DOMAIN }} -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
+
+      - name: Check NTS server
+        run: |
+          sudo echo "pool ntp.ubuntu.com        iburst maxsources 4"  | sudo tee /etc/chrony/sources.d/custom.sources
+          sudo echo "pool pool.ntp.org          iburst maxsources 4"  | sudo tee -a /etc/chrony/sources.d/custom.sources
+          sudo systemctl restart chrony.service
+          sleep 5
+          sudo echo "127.0.0.1 ${{ secrets.DOMAIN }}" | sudo tee -a /etc/hosts
+          chronyd -Q -t 3 "server ${{ secrets.DOMAIN }} iburst nts maxsamples 1"
