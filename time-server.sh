@@ -11,16 +11,13 @@ readonly CHRONY_CERTS_DIR="/etc/chrony/certs"
 readonly CF_INI=~/.secrets/certbot/cloudflare.ini
 readonly CERTBOT_CHRONY_HOOK="/usr/local/bin/certbot-chrony-hook.sh"
 
-# NMEA sentences we are looking for while searching for a GPS device
-readonly NMEA_REGEX='^\$(BD|GA|GB|GI|GL|GN|GP|GQ)(GGA|RMC|GSA|GSV|VTG|ZDA|TXT)'
-
 # --- Helper Functions ---
 log_message() {
     printf "[INFO] %s\n" "${1}"
 }
 
 debug_message() {
-    if [ -z "${DEBUG}" ] || [ "$DEBUG" = "0" ] || [ "$DEBUG" = "false" ]; then
+    if [ -z "${DEBUG}" ] || [ "${DEBUG}" = "0" ] || [ "${DEBUG}" = "false" ]; then
         return 0
     fi
     printf "[DEBUG] %s\n" "${1}"
@@ -76,39 +73,15 @@ systemctl restart chrony.service
 EOF
 }
 
-is_gpsd_working() {
-    local gps_device_from_gpsctl=""
-
-    log_message "Checking if gpsd is active and has a device using gpsctl..."
-    if ! systemctl is-active --quiet gpsd.socket; then
-        error_message "gpsd service is not active. Please start it with 'systemctl start gpsd.socket' or check its status."
-    fi
-    debug_message "gpsd service is active."
-
-    gpsctl_output=$(timeout 10s gpsctl 2>&1)
-    if [ $? -eq 0 ] && [ -n "$gpsctl_output" ]; then
-        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+' | head -n 1)
-    else
-        debug_message "gpsctl command failed, or produced no output, or gpsd is not connected to a device."
-    fi
-    debug_message "gpsctl output: ${gpsctl_output}"
-
-    if [ -n "${gps_device_from_gpsctl}" ]; then
-        log_message "gpsd seems to be managing ${gps_device_from_gpsctl} (according to gpsctl)"
-        return 0
-    else
-        log_message "gpsctl did not clearly indicate an active GPS device managed by gpsd."
-        return 1
-    fi
-}
-
+# local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
+# shellcheck disable=SC3043
 find_and_update_gpsd_device() {
-    local gps_device=""
+    local found_gps_device=""
     local speed=""
 
     log_message "Searching for GPS device..."
     for pattern in /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* /dev/ttyS*; do
-        for potential_device in $pattern; do
+        for potential_device in ${pattern}; do
             if [ ! -e "${potential_device}" ]; then
                 debug_message "Device ${potential_device} does not exist, skipping."
                 continue
@@ -118,10 +91,11 @@ find_and_update_gpsd_device() {
             for baud_rate in 460800 230400 115200 57600 38400 19200 9600 4800; do
                 debug_message "Trying baud rate ${baud_rate} on ${potential_device}"
                 # If the device responds with valid NMEA data, we assume it's a GPS device.
-                if timeout 0.5s stty -F "${potential_device}" ${baud_rate} raw -echo 2>/dev/null &&
-                    timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -E "${NMEA_REGEX}"; then
+                # shellcheck disable=SC2016 # Single quote strings are used to prevent variable expansion
+                if timeout 0.5s stty -F "${potential_device}" "${baud_rate}" raw -echo 2>/dev/null &&
+                    timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -E '^\$(BD|GA|GB|GI|GL|GN|GP|GQ)(GGA|RMC|GSA|GSV|VTG|ZDA|TXT)'; then
                     debug_message "GPS-like NMEA data found on ${potential_device}"
-                    gps_device="${potential_device}"
+                    found_gps_device="${potential_device}"
                     speed="${baud_rate}"
                     break 3 # Break out of all loops
                 fi
@@ -131,9 +105,9 @@ find_and_update_gpsd_device() {
         done
     done
 
-    if [ -n "${gps_device}" ]; then
-        log_message "GPS receiver found: ${gps_device}"
-        sed -i "s|^DEVICES=.*|DEVICES=\"${gps_device}\"|" /etc/default/gpsd
+    if [ -n "${found_gps_device}" ]; then
+        log_message "GPS receiver found: ${found_gps_device}"
+        sed -i "s|^DEVICES=.*|DEVICES=\"${found_gps_device}\"|" /etc/default/gpsd
         sed -i "s|^GPSD_OPTIONS=.*|GPSD_OPTIONS=\"-n -s ${speed}\"|" /etc/default/gpsd
         log_message "/etc/default/gpsd updated."
         log_message "Restarting GPSD service..."
@@ -173,7 +147,7 @@ chrony_enable_tls() {
         debug_message "Installing certbot-dns-cloudflare..."
         apt install -y -qq python3-certbot-dns-cloudflare
         log_message "Obtaining TLS certificate for ${DOMAIN}... using Cloudflare DNS"
-        certbot certonly --dns-cloudflare --dns-cloudflare-credentials "${CF_INI}" --email "${EMAIL}" --deploy-hook "${CERTBOT_CHRONY_HOOK}" --agree-tos --non-interactive -d "${DOMAIN}"
+        certbot certonly --dns-cloudflare --dns-cloudflare-credentials "${CF_INI}" --dns-cloudflare-propagation-seconds 30 --email "${EMAIL}" --deploy-hook "${CERTBOT_CHRONY_HOOK}" --agree-tos --non-interactive -d "${DOMAIN}"
     else
         log_message "Obtaining TLS certificate for ${DOMAIN}... using HTTP challenge"
         certbot certonly --standalone --email "${EMAIL}" --deploy-hook "${CERTBOT_CHRONY_HOOK}" --agree-tos --non-interactive -d "${DOMAIN}"
@@ -188,6 +162,8 @@ chrony_enable_tls() {
     debug_message "You can test the TLS connection with: chronyd -Q -t 3 'server ${DOMAIN} iburst nts maxsamples 1'"
 }
 
+# local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
+# shellcheck disable=SC3043
 main() {
     # Parse command-line arguments
     while [ "$#" -gt 0 ]; do
@@ -237,7 +213,22 @@ main() {
     apt install -y -qq gpsd chrony
 
     debug_message "##### 2. configuring gpsd #####"
-    if ! is_gpsd_working; then
+    log_message "Checking if gpsd is active and has a device using gpsctl..."
+    if ! systemctl is-active --quiet gpsd.socket; then
+        error_message "gpsd service is not active. Please start it with 'systemctl start gpsd.socket' or check its status."
+    fi
+    debug_message "gpsd service is active."
+    local gps_device_from_gpsctl=""
+    local gpsctl_output=""
+    if gpsctl_output=$(timeout 10s gpsctl 2>&1) && [ -n "${gpsctl_output}" ]; then
+        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+' | head -n 1)
+    else
+        debug_message "gpsctl command failed, or produced no output, or gpsd is not connected to a device."
+    fi
+    debug_message "gpsctl output: ${gpsctl_output}"
+    if [ -n "${gps_device_from_gpsctl}" ]; then
+        log_message "gpsd seems to be managing ${gps_device_from_gpsctl} (according to gpsctl)"
+    else
         find_and_update_gpsd_device
     fi
 
