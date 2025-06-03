@@ -44,10 +44,13 @@ jobs:
       - name: Check NTP server
         run: |
           systemctl status chrony.service
+          cat /etc/chrony/chrony.conf
+          sudo echo "pool ntp.ubuntu.com        iburst maxsources 4"  | sudo tee /etc/shrony/sources.d/custom.conf
+          sudo systemctl restart chrony.service
           sleep 5
-          chronyc sources
+          chronyc -N sources
           chronyc tracking
-          chronyc sourcestats
+          chronyc -N sourcestats
           systemctl status chrony.service
           chronyd -Q -t 3 "server localhost iburst maxsamples 1"
 
