@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run the script
-        run: ./time-server.sh --debug
+        run: sudo ./time-server.sh --debug
 
       - name: Check NTP server
         run: chronyd -Q -t 3 "server localhost iburst maxsamples 1"
@@ -54,7 +54,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run the script
-        run: ./time-server.sh --debug -d ${{ secrets.DOMAIN }} -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
+        run: sudo ./time-server.sh --debug -d ${{ secrets.DOMAIN }} -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
 
       - name: Check NTS server
         run: |
