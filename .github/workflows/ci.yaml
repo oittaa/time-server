@@ -43,10 +43,14 @@ jobs:
         run: sudo ./time-server.sh --debug
 
       - name: Check NTP server
-        run: chronyd -Q -t 3 "server localhost iburst maxsamples 1"
+        run: |
+          systemctl status chrony.service
+          sleep 5
+          systemctl status chrony.service
+          chronyd -Q -t 3 "server localhost iburst maxsamples 1"
 
   test-nts:
-    needs: lint
+    needs: [lint, test-ntp]
     runs-on: ubuntu-latest
 
     steps:
@@ -58,5 +62,7 @@ jobs:
 
       - name: Check NTS server
         run: |
+          systemctl status chrony.service
+          sleep 5
           sudo echo "127.0.0.1 ${{ secrets.DOMAIN }}" | sudo tee -a /etc/hosts
           chronyd -Q -t 3 "server ${{ secrets.DOMAIN }} iburst nts maxsamples 1"
