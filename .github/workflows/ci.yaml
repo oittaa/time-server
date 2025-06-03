@@ -45,7 +45,8 @@ jobs:
         run: |
           systemctl status chrony.service
           cat /etc/chrony/chrony.conf
-          sudo echo "pool ntp.ubuntu.com        iburst maxsources 4"  | sudo tee /etc/chrony/sources.d/custom.conf
+          sudo echo "pool ntp.ubuntu.com        iburst maxsources 4"  | sudo tee /etc/chrony/sources.d/custom.sources
+          sudo echo "pool ntp.ntp.org        iburst maxsources 4"  | sudo tee -a /etc/chrony/sources.d/custom.sources
           sudo systemctl restart chrony.service
           sleep 5
           chronyc -N sources
