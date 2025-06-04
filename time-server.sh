@@ -1,15 +1,24 @@
 #!/bin/sh
 # Install and configure GPSD and Chrony on Debian-based systems
+#
+# shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 
 set -e
 
 readonly CHRONY_CONF_SERVER="/etc/chrony/conf.d/10-server.conf"
 readonly CHRONY_CONF_GPS="/etc/chrony/conf.d/20-gps.conf"
 
+# In addition to the standard NMEA sentences, there might be others like:
+# $GPTXT,01,01,02,u-blox ag - www.u-blox.com*50
+# $GNTXT,01,01,02,HW UBX-M8030 00080000*60
+readonly NMEA_REGEX="^\\\$(BD|GA|GB|GI|GL|GN|GP|GQ)(GGA|RMC|GSA|GSV|VTG|ZDA|TXT)"
+
 # TLS support
 readonly CHRONY_CERTS_DIR="/etc/chrony/certs"
-readonly CF_INI=~/.secrets/certbot/cloudflare.ini
+readonly CLOUDFLARE_INI=~/.secrets/certbot/cloudflare.ini
 readonly CERTBOT_CHRONY_HOOK="/usr/local/bin/certbot-chrony-hook.sh"
+
+APT_NEEDS_UPDATE=1
 
 # --- Helper Functions ---
 log_message() {
@@ -26,6 +35,25 @@ debug_message() {
 error_message() {
     printf "[ERROR] %s\n" "${1}" >&2
     exit 1
+}
+
+install_pkg() {
+    local pkg="$1"
+    if ! command -v apt-get >/dev/null 2>&1; then
+        error_message "This script requires 'apt-get'."
+    fi
+    export DEBIAN_FRONTEND=noninteractive
+    if dpkg -s "${pkg}" 2>/dev/null | grep -q -E "^Status: install ok installed$"; then
+        debug_message "Package ${pkg} is already installed."
+    else
+        if [ "${APT_NEEDS_UPDATE}" -eq 1 ]; then
+            log_message "Updating package lists..."
+            apt-get -qq update || error_message "Failed to update package lists."
+            APT_NEEDS_UPDATE=0
+        fi
+        log_message "Installing package: ${pkg}"
+        apt-get -y -qq install "${pkg}" || error_message "Failed to install package: ${pkg}"
+    fi
 }
 
 show_help() {
@@ -73,8 +101,6 @@ systemctl restart chrony.service
 EOF
 }
 
-# local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
-# shellcheck disable=SC3043
 find_and_update_gpsd_device() {
     local found_gps_device=""
     local speed=""
@@ -91,9 +117,8 @@ find_and_update_gpsd_device() {
             for baud_rate in 460800 230400 115200 57600 38400 19200 9600 4800; do
                 debug_message "Trying baud rate ${baud_rate} on ${potential_device}"
                 # If the device responds with valid NMEA data, we assume it's a GPS device.
-                # shellcheck disable=SC2016 # Single quote strings are used to prevent variable expansion
                 if timeout 0.5s stty -F "${potential_device}" "${baud_rate}" raw -echo 2>/dev/null &&
-                    timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -E '^\$(BD|GA|GB|GI|GL|GN|GP|GQ)(GGA|RMC|GSA|GSV|VTG|ZDA|TXT)'; then
+                    timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -E "${NMEA_REGEX}"; then
                     debug_message "GPS-like NMEA data found on ${potential_device}"
                     found_gps_device="${potential_device}"
                     speed="${baud_rate}"
@@ -105,7 +130,7 @@ find_and_update_gpsd_device() {
         done
     done
 
-    if [ -n "${found_gps_device}" ]; then
+    if [ -n "${found_gps_device}" ] && [ -n "${speed}" ]; then
         log_message "GPS receiver found: ${found_gps_device}"
         sed -i "s|^DEVICES=.*|DEVICES=\"${found_gps_device}\"|" /etc/default/gpsd
         sed -i "s|^GPSD_OPTIONS=.*|GPSD_OPTIONS=\"-n -s ${speed}\"|" /etc/default/gpsd
@@ -115,7 +140,6 @@ find_and_update_gpsd_device() {
     else
         log_message "No GPS receiver detected automatically."
     fi
-
 }
 
 chrony_enable_tls() {
@@ -123,47 +147,49 @@ chrony_enable_tls() {
     if [ -z "${DOMAIN}" ] || [ -z "${EMAIL}" ]; then
         error_message "DOMAIN and EMAIL must be set for TLS support (either via environment variables or command-line options)."
     fi
-    if [ -n "${CLOUDFLARE_TOKEN}" ]; then
-        log_message "Creating Cloudflare credentials file..."
-        mkdir -p "$(dirname "${CF_INI}")"
-        touch "${CF_INI}"
-        chmod 600 "${CF_INI}"
-        printf "dns_cloudflare_api_token = %s\n" "${CLOUDFLARE_TOKEN}" >"${CF_INI}"
+    install_pkg certbot
+    if [ ! -e "${CHRONY_CERTS_DIR}" ]; then
+        debug_message "Creating ${CHRONY_CERTS_DIR} directory..."
+        mkdir -p "${CHRONY_CERTS_DIR}"
+        chown root:_chrony "${CHRONY_CERTS_DIR}"
+        chmod 750 "${CHRONY_CERTS_DIR}"
     fi
-    debug_message "Installing certbot..."
-    apt install -y -qq certbot
-    debug_message "Creating ${CHRONY_CERTS_DIR} directory..."
-    mkdir -p "${CHRONY_CERTS_DIR}"
-    chown root:_chrony "${CHRONY_CERTS_DIR}"
-    chmod 750 "${CHRONY_CERTS_DIR}"
-
     if [ -f "${CERTBOT_CHRONY_HOOK}" ]; then
         debug_message "Existing ${CERTBOT_CHRONY_HOOK} file..."
     else
         create_certbot_chrony_hook
     fi
 
-    if [ -f "${CF_INI}" ] && [ -n "${CLOUDFLARE_TOKEN}" ]; then
-        debug_message "Installing certbot-dns-cloudflare..."
-        apt install -y -qq python3-certbot-dns-cloudflare
+    if [ -n "${CLOUDFLARE_TOKEN}" ]; then
+        if [ ! -e "${CLOUDFLARE_INI}" ]; then
+            log_message "Creating Cloudflare credentials file..."
+            mkdir -p "$(dirname "${CLOUDFLARE_INI}")"
+            touch "${CLOUDFLARE_INI}"
+            chmod 600 "${CLOUDFLARE_INI}"
+        fi
+        printf "dns_cloudflare_api_token = %s\n" "${CLOUDFLARE_TOKEN}" >"${CLOUDFLARE_INI}"
+        install_pkg python3-certbot-dns-cloudflare
         log_message "Obtaining TLS certificate for ${DOMAIN}... using Cloudflare DNS"
-        certbot certonly --dns-cloudflare --dns-cloudflare-credentials "${CF_INI}" --dns-cloudflare-propagation-seconds 30 --email "${EMAIL}" --deploy-hook "${CERTBOT_CHRONY_HOOK}" --agree-tos --non-interactive -d "${DOMAIN}"
+        certbot certonly --dns-cloudflare --dns-cloudflare-credentials \
+            "${CLOUDFLARE_INI}" --dns-cloudflare-propagation-seconds 30 \
+            --email "${EMAIL}" --deploy-hook "${CERTBOT_CHRONY_HOOK}" \
+            --agree-tos --non-interactive -d "${DOMAIN}"
     else
         log_message "Obtaining TLS certificate for ${DOMAIN}... using HTTP challenge"
-        certbot certonly --standalone --email "${EMAIL}" --deploy-hook "${CERTBOT_CHRONY_HOOK}" --agree-tos --non-interactive -d "${DOMAIN}"
+        certbot certonly --standalone --email "${EMAIL}" --deploy-hook \
+            "${CERTBOT_CHRONY_HOOK}" --agree-tos --non-interactive -d "${DOMAIN}"
     fi
-    log_message "TLS certificate obtained successfully."
     if grep -q -F ntsservercert "${CHRONY_CONF_SERVER}"; then
         debug_message "TLS certificate already configured in ${CHRONY_CONF_SERVER}."
     else
         debug_message "Configuring TLS certificate in ${CHRONY_CONF_SERVER}..."
-        printf "ntsservercert %s/fullchain.pem\nntsserverkey %s/privkey.pem\n" "${CHRONY_CERTS_DIR}" "${CHRONY_CERTS_DIR}" >>"${CHRONY_CONF_SERVER}"
+        printf "ntsservercert %s/fullchain.pem\nntsserverkey %s/privkey.pem\n" \
+            "${CHRONY_CERTS_DIR}" "${CHRONY_CERTS_DIR}" >>"${CHRONY_CONF_SERVER}"
     fi
+    log_message "TLS certificate configured."
     debug_message "You can test the TLS connection with: chronyd -Q -t 3 'server ${DOMAIN} iburst nts maxsamples 1'"
 }
 
-# local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
-# shellcheck disable=SC3043
 main() {
     # Parse command-line arguments
     while [ "$#" -gt 0 ]; do
@@ -201,18 +227,8 @@ main() {
     debug_message "CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN:+SET}" # Only indicate if set, not the value itself for security
     debug_message "DEBUG=${DEBUG}"
 
-    if ! command -v apt >/dev/null 2>&1; then
-        error_message "This script requires 'apt' to be installed.\nAre you running on a Debian-based system?"
-    fi
-
-    debug_message "##### 1. installing gpsd and chrony #####"
-    export DEBIAN_FRONTEND=noninteractive
-    log_message "Updating package lists..."
-    apt update -qq
-    log_message "Installing gpsd and chrony..."
-    apt install -y -qq gpsd chrony
-
-    debug_message "##### 2. configuring gpsd #####"
+    debug_message "##### 1. install and configure gpsd #####"
+    install_pkg gpsd
     log_message "Checking if gpsd is active and has a device using gpsctl..."
     if ! systemctl is-active --quiet gpsd.socket; then
         error_message "gpsd service is not active. Please start it with 'systemctl start gpsd.socket' or check its status."
@@ -221,7 +237,7 @@ main() {
     local gps_device_from_gpsctl=""
     local gpsctl_output=""
     if gpsctl_output=$(timeout 10s gpsctl 2>&1) && [ -n "${gpsctl_output}" ]; then
-        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+' | head -n 1)
+        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -m 1 -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+')
     else
         debug_message "gpsctl command failed, or produced no output, or gpsd is not connected to a device."
     fi
@@ -229,10 +245,13 @@ main() {
     if [ -n "${gps_device_from_gpsctl}" ]; then
         log_message "gpsd seems to be managing ${gps_device_from_gpsctl} (according to gpsctl)"
     else
+        log_message "gpsd not managing any device (according to gpsctl)."
+        log_message "Attempting to find a GPS device automatically. This may take some time..."
         find_and_update_gpsd_device
     fi
 
-    debug_message "##### 3. configuring chrony #####"
+    debug_message "##### 2. install and configure chrony #####"
+    install_pkg chrony
     if [ -f "${CHRONY_CONF_SERVER}" ]; then
         debug_message "Existing ${CHRONY_CONF_SERVER} file..."
     else
@@ -241,7 +260,6 @@ main() {
         chmod 644 "${CHRONY_CONF_SERVER}"
         printf "allow\n" >"${CHRONY_CONF_SERVER}"
     fi
-
     if [ -f "${CHRONY_CONF_GPS}" ]; then
         debug_message "Existing ${CHRONY_CONF_GPS} file..."
     else
@@ -251,8 +269,8 @@ main() {
         printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\nhwtimestamp *\n" >"${CHRONY_CONF_GPS}"
     fi
 
-    debug_message "##### 4. configuring chrony for TLS support #####"
     if [ -n "${EMAIL}" ] && [ -n "${DOMAIN}" ]; then
+        debug_message "##### 3. TLS support for chrony #####"
         chrony_enable_tls
     elif [ -n "${EMAIL}" ] || [ -n "${DOMAIN}" ]; then
         log_message "Warning: For TLS support, both DOMAIN and EMAIL must be provided. TLS will not be configured."
