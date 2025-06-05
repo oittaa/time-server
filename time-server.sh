@@ -1,7 +1,5 @@
 #!/bin/sh
 # Install and configure GPSD and Chrony on Debian-based systems
-#
-# shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 
 set -e
 
@@ -38,14 +36,15 @@ error_message() {
 }
 
 install_pkg() {
-    local pkg="$1"
     if ! command -v apt-get >/dev/null 2>&1; then
         error_message "This script requires 'apt-get'."
     fi
     export DEBIAN_FRONTEND=noninteractive
-    if dpkg -s "${pkg}" 2>/dev/null | grep -q -E "^Status: install ok installed$"; then
-        debug_message "Package ${pkg} is already installed."
-    else
+    for pkg in "$@"; do
+        if dpkg -s "${pkg}" 2>/dev/null | grep -q -E "^Status: install ok installed$"; then
+            debug_message "Package ${pkg} is already installed."
+            continue
+        fi
         if [ "${APT_NEEDS_UPDATE}" -eq 1 ]; then
             log_message "Updating package lists..."
             apt-get -qq update || error_message "Failed to update package lists."
@@ -53,7 +52,7 @@ install_pkg() {
         fi
         log_message "Installing package: ${pkg}"
         apt-get -y -qq install "${pkg}" || error_message "Failed to install package: ${pkg}"
-    fi
+    done
 }
 
 show_help() {
@@ -101,6 +100,7 @@ systemctl restart chrony.service
 EOF
 }
 
+# shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 find_and_update_gpsd_device() {
     local found_gps_device=""
     local speed=""
@@ -190,6 +190,7 @@ chrony_enable_tls() {
     debug_message "You can test the TLS connection with: chronyd -Q -t 3 'server ${DOMAIN} iburst nts maxsamples 1'"
 }
 
+# shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 main() {
     # Parse command-line arguments
     while [ "$#" -gt 0 ]; do
@@ -279,7 +280,6 @@ main() {
     log_message "Restarting Chrony service..."
     systemctl restart chrony.service
     log_message "Done! GPSD and Chrony have been installed and configured successfully."
-    log_message "You can check the status of Chrony with: systemctl status chrony.service"
     log_message "To verify GPS synchronization, use: chronyc tracking"
 }
 
