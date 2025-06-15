@@ -82,6 +82,8 @@ Environment Variables:
   EMAIL:                            Email address for TLS support (e.g., "info@example.com").
   CLOUDFLARE_TOKEN:                 Cloudflare API token for DNS challenge.
   DEBUG:                            Set to "1" or "true" to enable debug messages.
+  FORCE:                            Set to "1" or "true" to force re-creation of configuration
+                                    files and hooks.
 
 EOF
 }
@@ -304,14 +306,25 @@ main() {
         log_message "Creating ${CHRONY_CONF_GPS} file..."
         touch "${CHRONY_CONF_GPS}"
         chmod 644 "${CHRONY_CONF_GPS}"
+        printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\n" >"${CHRONY_CONF_GPS}" # default SHM configuration
         pps_device=$(grep -o -E '^DEVICES="[^"]*"' /etc/default/gpsd | tail -n 1 | grep -o -E '/dev/pps[0-9]*' || true)
         if [ -n "${pps_device}" ]; then
             debug_message "Configuring SHM for GPS with PPS device: ${pps_device}"
             printf "refclock PPS %s poll 0 lock GPS0 refid PPS\n" "${pps_device}" >"${CHRONY_CONF_GPS}"
             printf "refclock SHM 0 poll 0 refid GPS0 noselect\n" >>"${CHRONY_CONF_GPS}"
         else
-            debug_message "No PPS device found, using SHM for GPS."
-            printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\n" >"${CHRONY_CONF_GPS}"
+            for pps_device in $(cd /dev/ && printf "%s\n" ptp*); do
+                if [ -c "/dev/${pps_device}" ] && [ -f "/sys/class/ptp/${pps_device}/fifo" ]; then
+                    debug_message "Testing PHC device: /dev/${pps_device}..."
+                    if [ "$(cut -d ' ' -f 2 /sys/class/ptp/"${pps_device}"/fifo)" -gt 0 ]; then
+                        log_message "PHC device found: /dev/${pps_device}"
+                        printf "refclock PHC /dev/%s:extpps poll 0 lock GPS0 refid PPS\n" "${pps_device}" >"${CHRONY_CONF_GPS}"
+                        printf "refclock SHM 0 poll 0 refid GPS0 noselect\n" >>"${CHRONY_CONF_GPS}"
+                        break
+                    fi
+                    debug_message "No valid PPS data found on /dev/${pps_device}"
+                fi
+            done
         fi
     fi
 
