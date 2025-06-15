@@ -35,10 +35,12 @@ error_message() {
     exit 1
 }
 
+# shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 install_pkg() {
     if ! command -v apt-get >/dev/null 2>&1; then
         error_message "This script requires 'apt-get'."
     fi
+    local pkg
     export DEBIAN_FRONTEND=noninteractive
     for pkg in "$@"; do
         if dpkg -s "${pkg}" 2>/dev/null | grep -q -E "^Status: install ok installed$"; then
@@ -70,6 +72,9 @@ Options:
                                     Overrides the CLOUDFLARE_TOKEN environment variable.
   --debug                           Enable debug messages.
                                     Overrides the DEBUG environment variable (sets to "true").
+  --force                           Force re-creation of configuration files and hooks.
+                                    Overrides the FORCE environment variable (sets to "true").
+                                    By default, existing configuration files are not overwritten.
   -h, --help                        Show this help message and exit.
 
 Environment Variables:
@@ -104,11 +109,16 @@ EOF
 find_and_update_gpsd_device() {
     local found_gps_device=""
     local speed=""
+    local pattern
+    local potential_device
+    local baud_rate
+    local timestamp
+    local sequence
 
     log_message "Searching for GPS device..."
     for pattern in /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* /dev/ttyS*; do
         for potential_device in ${pattern}; do
-            if [ ! -e "${potential_device}" ]; then
+            if [ ! -c "${potential_device}" ]; then
                 debug_message "Device ${potential_device} does not exist, skipping."
                 continue
             fi
@@ -132,6 +142,18 @@ find_and_update_gpsd_device() {
 
     if [ -n "${found_gps_device}" ] && [ -n "${speed}" ]; then
         log_message "GPS receiver found: ${found_gps_device}"
+        for potential_device in $(cd /dev/ && printf "%s\n" pps*); do
+            if [ -c "/dev/${potential_device}" ] && [ -f "/sys/class/pps/${potential_device}/assert" ]; then
+                debug_message "Testing PPS device: /dev/${potential_device}..."
+                IFS='#' read -r timestamp sequence <"/sys/class/pps/${potential_device}/assert"
+                if [ -n "${timestamp}" ] && [ -n "${sequence}" ] && [ "${sequence}" -gt 0 ]; then
+                    log_message "PPS device found: /dev/${potential_device}"
+                    found_gps_device="${found_gps_device} /dev/${potential_device}"
+                    break
+                fi
+                debug_message "No valid PPS data found on /dev/${potential_device}"
+            fi
+        done
         sed -i "s|^DEVICES=.*|DEVICES=\"${found_gps_device}\"|" /etc/default/gpsd
         sed -i "s|^GPSD_OPTIONS=.*|GPSD_OPTIONS=\"-n -s ${speed}\"|" /etc/default/gpsd
         log_message "/etc/default/gpsd updated."
@@ -154,7 +176,7 @@ chrony_enable_tls() {
         chown root:_chrony "${CHRONY_CERTS_DIR}"
         chmod 750 "${CHRONY_CERTS_DIR}"
     fi
-    if [ -f "${CERTBOT_CHRONY_HOOK}" ]; then
+    if [ -f "${CERTBOT_CHRONY_HOOK}" ] && [ -z "${FORCE}" ]; then
         debug_message "Existing ${CERTBOT_CHRONY_HOOK} file..."
     else
         create_certbot_chrony_hook
@@ -192,6 +214,10 @@ chrony_enable_tls() {
 
 # shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 main() {
+    local gps_device_from_gpsctl=""
+    local gpsctl_output=""
+    local total_memory_bytes
+    local pps_device
     # Parse command-line arguments
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -211,6 +237,10 @@ main() {
             DEBUG="true"
             shift 1
             ;;
+        --force)
+            FORCE="true"
+            shift 1
+            ;;
         -h | --help)
             show_help
             exit 0
@@ -227,6 +257,7 @@ main() {
     debug_message "EMAIL=${EMAIL}"
     debug_message "CLOUDFLARE_TOKEN=${CLOUDFLARE_TOKEN:+SET}" # Only indicate if set, not the value itself for security
     debug_message "DEBUG=${DEBUG}"
+    debug_message "FORCE=${FORCE}"
 
     debug_message "##### 1. install and configure gpsd #####"
     install_pkg gpsd
@@ -235,10 +266,8 @@ main() {
         error_message "gpsd service is not active. Please start it with 'systemctl start gpsd.socket' or check its status."
     fi
     debug_message "gpsd service is active."
-    local gps_device_from_gpsctl=""
-    local gpsctl_output=""
     if gpsctl_output=$(timeout 10s gpsctl 2>&1) && [ -n "${gpsctl_output}" ]; then
-        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -m 1 -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+')
+        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -m 1 -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+' || true)
     else
         debug_message "gpsctl command failed, or produced no output, or gpsd is not connected to a device."
     fi
@@ -246,28 +275,44 @@ main() {
     if [ -n "${gps_device_from_gpsctl}" ]; then
         log_message "gpsd seems to be managing ${gps_device_from_gpsctl} (according to gpsctl)"
     else
-        log_message "gpsd not managing any device (according to gpsctl)."
+        log_message "gpsd not managing any GPS device (according to gpsctl)."
         log_message "Attempting to find a GPS device automatically. This may take some time..."
         find_and_update_gpsd_device
     fi
 
     debug_message "##### 2. install and configure chrony #####"
     install_pkg chrony
-    if [ -f "${CHRONY_CONF_SERVER}" ]; then
+    if [ -f "${CHRONY_CONF_SERVER}" ] && [ -z "${FORCE}" ]; then
         debug_message "Existing ${CHRONY_CONF_SERVER} file..."
     else
         log_message "Creating ${CHRONY_CONF_SERVER} file..."
         touch "${CHRONY_CONF_SERVER}"
         chmod 644 "${CHRONY_CONF_SERVER}"
-        printf "allow\n" >"${CHRONY_CONF_SERVER}"
+        printf "allow\nhwtimestamp *\n" >"${CHRONY_CONF_SERVER}"
+        total_memory_bytes=$(free -b | grep '^Mem:' | tr -s ' ' | cut -d ' ' -f 2)
+        if [ "${total_memory_bytes}" -ge 4294967296 ]; then
+            debug_message "System has more than 4GB of RAM, setting clientloglimit to 2GB."
+            printf "clientloglimit 2147483648\n" >>"${CHRONY_CONF_SERVER}"
+        elif [ "${total_memory_bytes}" -ge 128000000 ]; then
+            debug_message "System has less than 4GB of RAM, setting clientloglimit to half of the memory."
+            printf "clientloglimit %d\n" $((total_memory_bytes / 2)) >>"${CHRONY_CONF_SERVER}"
+        fi
     fi
-    if [ -f "${CHRONY_CONF_GPS}" ]; then
+    if [ -f "${CHRONY_CONF_GPS}" ] && [ -z "${FORCE}" ]; then
         debug_message "Existing ${CHRONY_CONF_GPS} file..."
     else
         log_message "Creating ${CHRONY_CONF_GPS} file..."
         touch "${CHRONY_CONF_GPS}"
         chmod 644 "${CHRONY_CONF_GPS}"
-        printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\nhwtimestamp *\n" >"${CHRONY_CONF_GPS}"
+        pps_device=$(grep -o -E '^DEVICES="[^"]*"' /etc/default/gpsd | tail -n 1 | grep -o -E '/dev/pps[0-9]*' || true)
+        if [ -n "${pps_device}" ]; then
+            debug_message "Configuring SHM for GPS with PPS device: ${pps_device}"
+            printf "refclock PPS %s poll 0 lock GPS0 refid PPS\n" "${pps_device}" >"${CHRONY_CONF_GPS}"
+            printf "refclock SHM 0 poll 0 refid GPS0 noselect\n" >>"${CHRONY_CONF_GPS}"
+        else
+            debug_message "No PPS device found, using SHM for GPS."
+            printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\n" >"${CHRONY_CONF_GPS}"
+        fi
     fi
 
     if [ -n "${EMAIL}" ] && [ -n "${DOMAIN}" ]; then
