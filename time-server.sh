@@ -82,6 +82,8 @@ Environment Variables:
   EMAIL:                            Email address for TLS support (e.g., "info@example.com").
   CLOUDFLARE_TOKEN:                 Cloudflare API token for DNS challenge.
   DEBUG:                            Set to "1" or "true" to enable debug messages.
+  FORCE:                            Set to "1" or "true" to force re-creation of configuration
+                                    files and hooks.
 
 EOF
 }
@@ -214,10 +216,9 @@ chrony_enable_tls() {
 
 # shellcheck disable=SC3043 # local is supported in many shells, including bash, ksh, dash, and BusyBox ash.
 main() {
-    local gps_device_from_gpsctl=""
-    local gpsctl_output=""
+    local current_device=""
+    local cmd_output=""
     local total_memory_bytes
-    local pps_device
     # Parse command-line arguments
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -266,14 +267,14 @@ main() {
         error_message "gpsd service is not active. Please start it with 'systemctl start gpsd.socket' or check its status."
     fi
     debug_message "gpsd service is active."
-    if gpsctl_output=$(timeout 10s gpsctl 2>&1) && [ -n "${gpsctl_output}" ]; then
-        gps_device_from_gpsctl=$(echo "${gpsctl_output}" | grep -o -m 1 -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+' || true)
+    if cmd_output=$(timeout 10s gpsctl 2>&1) && [ -n "${cmd_output}" ]; then
+        current_device=$(echo "${cmd_output}" | grep -o -m 1 -E '/dev/[a-zA-Z0-9/]+(USB|ACM|AMA|S)[0-9]+' || true)
     else
         debug_message "gpsctl command failed, or produced no output, or gpsd is not connected to a device."
     fi
-    debug_message "gpsctl output: ${gpsctl_output}"
-    if [ -n "${gps_device_from_gpsctl}" ]; then
-        log_message "gpsd seems to be managing ${gps_device_from_gpsctl} (according to gpsctl)"
+    debug_message "gpsctl output: ${cmd_output}"
+    if [ -n "${current_device}" ]; then
+        log_message "gpsd seems to be managing ${current_device} (according to gpsctl)"
     else
         log_message "gpsd not managing any GPS device (according to gpsctl)."
         log_message "Attempting to find a GPS device automatically. This may take some time..."
@@ -304,14 +305,26 @@ main() {
         log_message "Creating ${CHRONY_CONF_GPS} file..."
         touch "${CHRONY_CONF_GPS}"
         chmod 644 "${CHRONY_CONF_GPS}"
-        pps_device=$(grep -o -E '^DEVICES="[^"]*"' /etc/default/gpsd | tail -n 1 | grep -o -E '/dev/pps[0-9]*' || true)
-        if [ -n "${pps_device}" ]; then
-            debug_message "Configuring SHM for GPS with PPS device: ${pps_device}"
-            printf "refclock PPS %s poll 0 lock GPS0 refid PPS\n" "${pps_device}" >"${CHRONY_CONF_GPS}"
+        printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\n" >"${CHRONY_CONF_GPS}" # default SHM configuration
+        current_device=$(grep -o -E '^DEVICES="[^"]*"' /etc/default/gpsd | tail -n 1 | grep -o -E '/dev/pps[0-9]*' || true)
+        if [ -n "${current_device}" ]; then
+            debug_message "Configuring SHM for GPS with PPS device: ${current_device}"
+            printf "refclock PPS %s poll 0 lock GPS0 refid PPS\n" "${current_device}" >"${CHRONY_CONF_GPS}"
             printf "refclock SHM 0 poll 0 refid GPS0 noselect\n" >>"${CHRONY_CONF_GPS}"
         else
-            debug_message "No PPS device found, using SHM for GPS."
-            printf "refclock SHM 0 refid GPS0 poll 0 filter 3 prefer trust\n" >"${CHRONY_CONF_GPS}"
+            for current_device in $(cd /dev/ && printf "%s\n" ptp*); do
+                if [ -c "/dev/${current_device}" ] && [ -f "/sys/class/ptp/${current_device}/fifo" ]; then
+                    debug_message "Testing PHC device: /dev/${current_device}..."
+                    cmd_output="$(cut -d ' ' -f 2 /sys/class/ptp/"${current_device}"/fifo)"
+                    if [ "${cmd_output}" -gt 0 ]; then
+                        log_message "PHC device found: /dev/${current_device}"
+                        printf "refclock PHC /dev/%s:extpps poll 0 lock GPS0 refid PPS\n" "${current_device}" >"${CHRONY_CONF_GPS}"
+                        printf "refclock SHM 0 poll 0 refid GPS0 noselect\n" >>"${CHRONY_CONF_GPS}"
+                        break
+                    fi
+                    debug_message "No valid PPS data found on /dev/${current_device}"
+                fi
+            done
         fi
     fi
 
