@@ -20,6 +20,9 @@ Options:
                                     Overrides the CLOUDFLARE_TOKEN environment variable.
   --debug                           Enable debug messages.
                                     Overrides the DEBUG environment variable (sets to "true").
+  --force                           Force re-creation of configuration files and hooks.
+                                    Overrides the FORCE environment variable (sets to "true").
+                                    By default, existing configuration files are not overwritten.
   -h, --help                        Show this help message and exit.
 
 Environment Variables:
@@ -30,3 +33,8 @@ Environment Variables:
 
 ```
 This script doesn't configure PTP, or Precision Time Protocol. In other words the server offers millisecond to tens of microsecond accuracy, which should be good enough for 99% of use cases. If you need nanosecond-accurate time, you might want to take a look at [Jeff Geerling's Time Pi-project](https://github.com/geerlingguy/time-pi).
+
+**IMPORTANT NOTE**: The 'SYNC_Out' label on the initial CM5 IO Board revision (the first production version) is in the wrong place, on pin 9 of J2. The correct pin is pin 6. The datasheet is correct, the IO Board silkscreen is wrong.
+
+![Image](https://github.com/user-attachments/assets/fddde188-677b-4dd8-abe7-9119dfba71df)
+On CM5-PoE-BASE-A from Waveshare the pin is where the label says it is.
