@@ -20,14 +20,14 @@ APT_NEEDS_UPDATE=1
 
 # --- Helper Functions ---
 log_message() {
-    printf "[INFO] %s\n" "${1}"
+    printf "[INFO] %s\n" "${1}" >&2
 }
 
 debug_message() {
-    if [ -z "${DEBUG}" ] || [ "${DEBUG}" = "0" ] || [ "${DEBUG}" = "false" ]; then
+    if [ -z "${DEBUG}" ]; then
         return 0
     fi
-    printf "[DEBUG] %s\n" "${1}"
+    printf "[DEBUG] %s\n" "${1}" >&2
 }
 
 error_message() {
@@ -84,7 +84,6 @@ Environment Variables:
   DEBUG:                            Set to "1" or "true" to enable debug messages.
   FORCE:                            Set to "1" or "true" to force re-creation of configuration
                                     files and hooks.
-
 EOF
 }
 
@@ -253,6 +252,15 @@ main() {
             ;;
         esac
     done
+
+    case "${DEBUG#}" in
+    "1" | [tT][rR][uU][eE]) ;;
+    *) unset DEBUG ;;
+    esac
+    case "${FORCE#}" in
+    "1" | [tT][rR][uU][eE]) ;;
+    *) unset FORCE ;;
+    esac
 
     debug_message "DOMAIN=${DOMAIN}"
     debug_message "EMAIL=${EMAIL}"
