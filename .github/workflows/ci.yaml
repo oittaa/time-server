@@ -61,7 +61,7 @@ jobs:
         run: echo "DOMAIN=x${GITHUB_SHA}x.${{ secrets.DOMAIN }}" >> $GITHUB_ENV
 
       - name: Run the script
-        run: sudo ./time-server.sh --debug -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
+        run: sudo ./time-server.sh --debug -d ${DOMAIN} -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
 
       - name: Check NTS server
         run: |
