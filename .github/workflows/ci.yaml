@@ -57,8 +57,11 @@ jobs:
       - name: Check out repository code
         uses: actions/checkout@v4
 
+      - name: Set the Domain
+        run: echo "DOMAIN=x${GITHUB_SHA}x.${{ secrets.DOMAIN }}" >> $GITHUB_ENV
+
       - name: Run the script
-        run: sudo ./time-server.sh --debug -d ${{ secrets.DOMAIN }} -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
+        run: sudo ./time-server.sh --debug -e ${{ secrets.EMAIL }} -t ${{ secrets.CLOUDFLARE_TOKEN }}
 
       - name: Check NTS server
         run: |
@@ -66,5 +69,5 @@ jobs:
           sudo echo "pool pool.ntp.org          iburst maxsources 4"  | sudo tee -a /etc/chrony/sources.d/custom.sources
           sudo systemctl restart chrony.service
           sleep 5
-          sudo echo "127.0.0.1 ${{ secrets.DOMAIN }}" | sudo tee -a /etc/hosts
-          chronyd -Q -t 3 "server ${{ secrets.DOMAIN }} iburst nts maxsamples 1"
+          sudo echo "127.0.0.1 ${DOMAIN}" | sudo tee -a /etc/hosts
+          chronyd -Q -t 3 "server ${DOMAIN} iburst nts maxsamples 1"
