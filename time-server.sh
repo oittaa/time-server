@@ -112,8 +112,6 @@ find_and_update_gpsd_device() {
     local speed=""
     local pattern
     local potential_device
-    local baud_rate
-    local timestamp
     local sequence
 
     log_message "Searching for GPS device..."
@@ -125,14 +123,13 @@ find_and_update_gpsd_device() {
             fi
 
             debug_message "Testing ${potential_device}...".
-            for baud_rate in 460800 230400 115200 57600 38400 19200 9600 4800; do
-                debug_message "Trying baud rate ${baud_rate} on ${potential_device}"
+            for speed in 460800 230400 115200 57600 38400 19200 9600 4800; do
+                debug_message "Trying baud rate ${speed} on ${potential_device}"
                 # If the device responds with valid NMEA data, we assume it's a GPS device.
-                if timeout 0.5s stty -F "${potential_device}" "${baud_rate}" raw -echo 2>/dev/null &&
+                if timeout 0.5s stty -F "${potential_device}" "${speed}" raw -echo 2>/dev/null &&
                     timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -E "${NMEA_REGEX}"; then
                     debug_message "GPS-like NMEA data found on ${potential_device}"
                     found_gps_device="${potential_device}"
-                    speed="${baud_rate}"
                     break 3 # Break out of all loops
                 fi
             done
@@ -146,8 +143,8 @@ find_and_update_gpsd_device() {
         for potential_device in $(cd /dev/ && printf "%s\n" pps*); do
             if [ -c "/dev/${potential_device}" ] && [ -f "/sys/class/pps/${potential_device}/assert" ]; then
                 debug_message "Testing PPS device: /dev/${potential_device}..."
-                IFS='#' read -r timestamp sequence <"/sys/class/pps/${potential_device}/assert"
-                if [ -n "${timestamp}" ] && [ -n "${sequence}" ] && [ "${sequence}" -gt 0 ]; then
+                sequence="$(grep -o -P '#\K\d+' /sys/class/pps/"${potential_device}"/assert || echo 0)"
+                if [ "${sequence}" -gt 0 ]; then
                     log_message "PPS device found: /dev/${potential_device}"
                     found_gps_device="${found_gps_device} /dev/${potential_device}"
                     break
@@ -217,7 +214,6 @@ chrony_enable_tls() {
 main() {
     local current_device=""
     local cmd_output=""
-    local total_memory_bytes
     # Parse command-line arguments
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -298,13 +294,13 @@ main() {
         touch "${CHRONY_CONF_SERVER}"
         chmod 644 "${CHRONY_CONF_SERVER}"
         printf "allow\nhwtimestamp *\n" >"${CHRONY_CONF_SERVER}"
-        total_memory_bytes=$(free -b | grep '^Mem:' | tr -s ' ' | cut -d ' ' -f 2)
-        if [ "${total_memory_bytes}" -ge 4294967296 ]; then
+        cmd_output=$(free -b | grep -o -P '^Mem:\s*\K\d+' || echo 0)
+        if [ "${cmd_output}" -ge 4294967296 ]; then
             debug_message "System has more than 4GB of RAM, setting clientloglimit to 2GB."
             printf "clientloglimit 2147483648\n" >>"${CHRONY_CONF_SERVER}"
-        elif [ "${total_memory_bytes}" -ge 128000000 ]; then
+        elif [ "${cmd_output}" -ge 128000000 ]; then
             debug_message "System has less than 4GB of RAM, setting clientloglimit to half of the memory."
-            printf "clientloglimit %d\n" $((total_memory_bytes / 2)) >>"${CHRONY_CONF_SERVER}"
+            printf "clientloglimit %d\n" $((cmd_output / 2)) >>"${CHRONY_CONF_SERVER}"
         fi
     fi
     if [ -f "${CHRONY_CONF_GPS}" ] && [ -z "${FORCE}" ]; then
@@ -323,7 +319,7 @@ main() {
             for current_device in $(cd /dev/ && printf "%s\n" ptp*); do
                 if [ -c "/dev/${current_device}" ] && [ -f "/sys/class/ptp/${current_device}/fifo" ]; then
                     debug_message "Testing PHC device: /dev/${current_device}..."
-                    cmd_output="$(cut -d ' ' -f 2 /sys/class/ptp/"${current_device}"/fifo)"
+                    cmd_output="$(grep -o -P '^\d+\s+\K\d+' /sys/class/ptp/"${current_device}"/fifo || echo 0)"
                     if [ "${cmd_output}" -gt 0 ]; then
                         log_message "PHC device found: /dev/${current_device}"
                         printf "refclock PHC /dev/%s:extpps poll 0 lock GPS0 refid PPS\n" "${current_device}" >"${CHRONY_CONF_GPS}"
