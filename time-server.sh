@@ -6,10 +6,9 @@ set -e
 readonly CHRONY_CONF_SERVER="/etc/chrony/conf.d/10-server.conf"
 readonly CHRONY_CONF_GPS="/etc/chrony/conf.d/20-gps.conf"
 
-# In addition to the standard NMEA sentences, there might be others like:
-# $GPTXT,01,01,02,u-blox ag - www.u-blox.com*50
-# $GNTXT,01,01,02,HW UBX-M8030 00080000*60
-readonly NMEA_REGEX="^\\\$(BD|GA|GB|GI|GL|GN|GP|GQ)(GGA|RMC|GSA|GSV|VTG|ZDA|TXT)"
+# Known GPS/GNSS device patters
+readonly NMEA_REGEX="^\\\$(BD|GA|GB|GI|GL|GN|GP|GQ)"
+readonly UBLOX_REGEX="^\xb5\x62"
 
 # TLS support
 readonly CHRONY_CERTS_DIR="/etc/chrony/certs"
@@ -17,6 +16,7 @@ readonly CLOUDFLARE_INI=~/.secrets/certbot/cloudflare.ini
 readonly CERTBOT_CHRONY_HOOK="/usr/local/bin/certbot-chrony-hook.sh"
 
 APT_NEEDS_UPDATE=1
+export LC_ALL=C
 
 # --- Helper Functions ---
 log_message() {
@@ -125,15 +125,15 @@ find_and_update_gpsd_device() {
             debug_message "Testing ${potential_device}...".
             for speed in 460800 230400 115200 57600 38400 19200 9600 4800; do
                 debug_message "Trying baud rate ${speed} on ${potential_device}"
-                # If the device responds with valid NMEA data, we assume it's a GPS device.
+                # If the device responds with valid NMEA data or U-blox header, we assume it's a GPS device.
                 if timeout 0.5s stty -F "${potential_device}" "${speed}" raw -echo 2>/dev/null &&
-                    timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -E "${NMEA_REGEX}"; then
-                    debug_message "GPS-like NMEA data found on ${potential_device}"
+                    timeout 2s head -n 5 "${potential_device}" 2>/dev/null | grep -q -P "${NMEA_REGEX}|${UBLOX_REGEX}"; then
+                    debug_message "GPS-like data found on ${potential_device}"
                     found_gps_device="${potential_device}"
                     break 3 # Break out of all loops
                 fi
             done
-            debug_message "No NMEA data or not a GPS device: ${potential_device}"
+            debug_message "No known GPS data or not a GPS device: ${potential_device}"
 
         done
     done
