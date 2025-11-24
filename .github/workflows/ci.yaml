@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install checkbashisms and shfmt
         run: |
@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run the script
         run: sudo ./time-server.sh --debug
@@ -55,7 +55,7 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set the Domain
         run: echo "DOMAIN=x${GITHUB_SHA}x.${{ secrets.DOMAIN }}" >> $GITHUB_ENV
